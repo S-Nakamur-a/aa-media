@@ -161,6 +161,14 @@ impl Renderer {
     ) {
         let ramp_len = self.chars.len();
 
+        // Mild gamma for character selection, stronger for color boost
+        let char_lut: [u8; 256] = std::array::from_fn(|i| {
+            ((i as f32 / 255.0).powf(0.7) * 255.0) as u8
+        });
+        let color_lut: [u8; 256] = std::array::from_fn(|i| {
+            ((i as f32 / 255.0).powf(0.6) * 255.0) as u8
+        });
+
         for y in 0..th {
             let row_off = y * stride;
             let line_width = tw.min(cols);
@@ -175,11 +183,13 @@ impl Renderer {
                 let r = rgb[off] as u32;
                 let g = rgb[off + 1] as u32;
                 let b = rgb[off + 2] as u32;
-                // Fast luminance approximation
-                let lum = (r * 77 + g * 150 + b * 29) >> 8;
-                let idx = (lum as usize * (ramp_len - 1)) / 255;
+                // Character selection: mildly corrected luminance
+                let lum = ((r * 77 + g * 150 + b * 29) >> 8) as usize;
+                let corrected_lum = char_lut[lum] as usize;
+                let idx = (corrected_lum * (ramp_len - 1)) / 255;
                 if self.color {
-                    let fg = (rgb[off], rgb[off + 1], rgb[off + 2]);
+                    // Color output: scale RGB by stronger gamma ratio
+                    let fg = boost_color(r, g, b, lum, &color_lut);
                     if first || fg != prev_fg {
                         use std::fmt::Write;
                         let _ = write!(self.buf, "\x1b[38;2;{};{};{}m", fg.0, fg.1, fg.2);
@@ -296,10 +306,12 @@ impl Renderer {
             [240, 112, 208,  80],
         ];
 
-        // Gamma LUT to brighten dark areas (gamma ≈ 0.3)
-        // This compensates for braille's binary dots making dark areas too black.
-        let gamma_lut: [u8; 256] = std::array::from_fn(|i| {
-            ((i as f32 / 255.0).powf(0.3) * 255.0) as u8
+        // Mild gamma for dot selection, stronger for color boost
+        let dot_lut: [u8; 256] = std::array::from_fn(|i| {
+            ((i as f32 / 255.0).powf(0.7) * 255.0) as u8
+        });
+        let color_lut: [u8; 256] = std::array::from_fn(|i| {
+            ((i as f32 / 255.0).powf(0.6) * 255.0) as u8
         });
 
         let cell_cols = (tw / 2).min(cols);
@@ -317,8 +329,12 @@ impl Renderer {
                 let mut sg: u32 = 0;
                 let mut sb: u32 = 0;
                 let mut count: u32 = 0;
+                let mut lum_min: u32 = 255;
+                let mut lum_max: u32 = 0;
 
-                for &(dx, dy, bit) in &DOTS {
+                // First pass: collect luminance range and color sums
+                let mut dot_lums: [u32; 8] = [0; 8];
+                for (i, &(dx, dy, _bit)) in DOTS.iter().enumerate() {
                     let px = x0 + dx;
                     let py = y0 + dy;
                     let off = py * stride + px * 3;
@@ -328,23 +344,42 @@ impl Renderer {
                         (0, 0, 0)
                     };
                     let lum = (r * 77 + g * 150 + b * 29) >> 8;
-                    let lum = gamma_lut[lum as usize] as u32;
-                    let threshold = BAYER4[py % 4][px % 4] as u32;
-                    if lum > threshold {
+                    dot_lums[i] = lum;
+                    lum_min = lum_min.min(lum);
+                    lum_max = lum_max.max(lum);
+                    sr += r;
+                    sg += g;
+                    sb += b;
+                    count += 1;
+                }
+
+                // Smooth threshold reduction based on cell uniformity.
+                // Low variance → reduce Bayer thresholds (dots turn ON easier).
+                // High variance → normal dithering.
+                let variance = lum_max - lum_min;
+                // uniformity: 1.0 (perfectly uniform) → 0.0 (high variance)
+                let uniformity = 1.0 - (variance as f32 / 128.0).min(1.0);
+                // Scale down thresholds: uniform areas get thresholds * (1 - uniformity²)
+                let threshold_scale = 1.0 - uniformity * uniformity;
+
+                for (i, &(_dx, dy, bit)) in DOTS.iter().enumerate() {
+                    let py = y0 + dy;
+                    let px = x0 + DOTS[i].0;
+                    let corrected_lum = dot_lut[dot_lums[i] as usize] as u32;
+                    let base_threshold = BAYER4[py % 4][px % 4] as f32;
+                    let threshold = (base_threshold * threshold_scale) as u32;
+                    if corrected_lum > threshold {
                         bits |= bit;
-                        sr += r;
-                        sg += g;
-                        sb += b;
-                        count += 1;
                     }
                 }
 
                 if count > 0 && self.color {
-                    let fg = (
-                        (sr / count) as u8,
-                        (sg / count) as u8,
-                        (sb / count) as u8,
-                    );
+                    // Color: boost by stronger gamma ratio
+                    let avg_r = sr / count;
+                    let avg_g = sg / count;
+                    let avg_b = sb / count;
+                    let avg_lum = ((avg_r * 77 + avg_g * 150 + avg_b * 29) >> 8) as usize;
+                    let fg = boost_color(avg_r, avg_g, avg_b, avg_lum, &color_lut);
                     if first || fg != prev_fg {
                         use std::fmt::Write;
                         let _ = write!(
@@ -546,12 +581,20 @@ impl Renderer {
     ) {
         use crate::kanji::{self, CELL};
 
+        // Mild gamma for character selection, stronger for color boost
+        let char_lut: [u8; 256] = std::array::from_fn(|i| {
+            ((i as f32 / 255.0).powf(0.7) * 255.0) as u8
+        });
+        let color_lut: [u8; 256] = std::array::from_fn(|i| {
+            ((i as f32 / 255.0).powf(0.6) * 255.0) as u8
+        });
+
         let kanji_cols = tw / CELL;
         let kanji_rows = th / CELL;
         let half = CELL / 2;
         let q_pixels = (half * half) as f32;
 
-        // Build luminance buffer (reused across frames)
+        // Build luminance buffer with mild gamma correction
         self.lum_buf.resize(tw * th, 0);
         for y in 0..th {
             let row_off = y * stride;
@@ -561,7 +604,8 @@ impl Renderer {
                     let r = rgb[off] as u32;
                     let g = rgb[off + 1] as u32;
                     let b = rgb[off + 2] as u32;
-                    self.lum_buf[y * tw + x] = ((r * 77 + g * 150 + b * 29) >> 8) as u8;
+                    let lum = ((r * 77 + g * 150 + b * 29) >> 8) as u8;
+                    self.lum_buf[y * tw + x] = char_lut[lum as usize];
                 } else {
                     self.lum_buf[y * tw + x] = 0;
                 }
@@ -606,7 +650,7 @@ impl Renderer {
                 let ch = kanji::lookup(density, dir);
 
                 if self.color {
-                    // Average color over the cell
+                    // Average color over the cell with gamma correction
                     let mut sr: u32 = 0;
                     let mut sg: u32 = 0;
                     let mut sb: u32 = 0;
@@ -621,11 +665,11 @@ impl Renderer {
                             }
                         }
                     }
-                    let fg = (
-                        (sr / cell_pixels) as u8,
-                        (sg / cell_pixels) as u8,
-                        (sb / cell_pixels) as u8,
-                    );
+                    let avg_r = sr / cell_pixels;
+                    let avg_g = sg / cell_pixels;
+                    let avg_b = sb / cell_pixels;
+                    let avg_lum = ((avg_r * 77 + avg_g * 150 + avg_b * 29) >> 8) as usize;
+                    let fg = boost_color(avg_r, avg_g, avg_b, avg_lum, &color_lut);
                     if first || fg != prev_fg {
                         use std::fmt::Write;
                         let _ = write!(self.buf, "\x1b[38;2;{};{};{}m", fg.0, fg.1, fg.2);
@@ -715,4 +759,20 @@ fn octant_char(pattern: u8) -> char {
             char::from_u32(0x1CD00 + p as u32 - below).unwrap()
         }
     }
+}
+
+/// Boost RGB color brightness using gamma-corrected luminance ratio.
+/// Preserves color hue/saturation while increasing perceived brightness.
+fn boost_color(r: u32, g: u32, b: u32, lum: usize, gamma_lut: &[u8; 256]) -> (u8, u8, u8) {
+    let max_ch = r.max(g).max(b);
+    if max_ch == 0 {
+        return (0, 0, 0);
+    }
+    let boosted = gamma_lut[lum] as f32;
+    let scale = (boosted / lum.max(1) as f32).min(255.0 / max_ch as f32);
+    (
+        (r as f32 * scale) as u8,
+        (g as f32 * scale) as u8,
+        (b as f32 * scale) as u8,
+    )
 }
