@@ -127,28 +127,50 @@ impl Renderer {
         let cols = cols as usize;
         let stride = tw * 3;
 
+        // Calculate horizontal padding for centering
+        let rendered_cols = match self.mode {
+            Mode::Ascii | Mode::Tile => tw.min(cols),
+            Mode::Braille | Mode::Octant => (tw / 2).min(cols),
+            Mode::Sextant => (tw / 2).min(cols),
+            Mode::Kanji => {
+                let cell = crate::kanji::CELL;
+                (tw / cell) * 2 // each kanji = 2 terminal columns
+            }
+        };
+        let pad = if cols > rendered_cols {
+            (cols - rendered_cols) / 2
+        } else {
+            0
+        };
+
         match self.mode {
             Mode::Ascii => {
-                self.render_ascii(tw, th, stride, rgb, cols);
+                self.render_ascii(tw, th, stride, rgb, cols, pad);
             }
             Mode::Tile => {
-                self.render_tile(tw, th, stride, rgb, cols);
+                self.render_tile(tw, th, stride, rgb, cols, pad);
             }
             Mode::Braille => {
-                self.render_braille(tw, th, stride, rgb, cols);
+                self.render_braille(tw, th, stride, rgb, cols, pad);
             }
             Mode::Sextant => {
-                self.render_sextant(tw, th, stride, rgb, cols);
+                self.render_sextant(tw, th, stride, rgb, cols, pad);
             }
             Mode::Octant => {
-                self.render_octant(tw, th, stride, rgb, cols);
+                self.render_octant(tw, th, stride, rgb, cols, pad);
             }
             Mode::Kanji => {
-                self.render_kanji(tw, th, stride, rgb);
+                self.render_kanji(tw, th, stride, rgb, pad);
             }
         }
 
         w.write_all(self.buf.as_bytes())
+    }
+
+    fn pad_line(&mut self, pad: usize) {
+        for _ in 0..pad {
+            self.buf.push(' ');
+        }
     }
 
     fn render_ascii(
@@ -158,6 +180,7 @@ impl Renderer {
         stride: usize,
         rgb: &[u8],
         cols: usize,
+        pad: usize,
     ) {
         let ramp_len = self.chars.len();
 
@@ -174,6 +197,7 @@ impl Renderer {
             let line_width = tw.min(cols);
             let mut prev_fg = (0u8, 0u8, 0u8);
             let mut first = true;
+            self.pad_line(pad);
             for x in 0..line_width {
                 let off = row_off + x * 3;
                 if off + 2 >= rgb.len() {
@@ -217,6 +241,7 @@ impl Renderer {
         stride: usize,
         rgb: &[u8],
         cols: usize,
+        pad: usize,
     ) {
         // Half-block rendering: each terminal row shows 2 pixel rows
         // Top pixel = foreground color, bottom pixel = background color, char = '▀'
@@ -233,6 +258,7 @@ impl Renderer {
             let mut prev_bg = (0u8, 0u8, 0u8);
             let mut first = true;
 
+            self.pad_line(pad);
             for x in 0..line_width {
                 let t = top_off + x * 3;
                 let b = bot_off + x * 3;
@@ -290,6 +316,7 @@ impl Renderer {
         stride: usize,
         rgb: &[u8],
         cols: usize,
+        pad: usize,
     ) {
         // Braille: each terminal cell = 2x4 pixel grid
         // Dot bit mapping: (dx, dy, bit)
@@ -321,6 +348,7 @@ impl Renderer {
             let mut prev_fg = (0u8, 0u8, 0u8);
             let mut first = true;
 
+            self.pad_line(pad);
             for cx in 0..cell_cols {
                 let x0 = cx * 2;
                 let y0 = cy * 4;
@@ -413,6 +441,7 @@ impl Renderer {
         stride: usize,
         rgb: &[u8],
         cols: usize,
+        pad: usize,
     ) {
         // 4x4 Bayer ordered dithering matrix
         const BAYER4: [[u8; 4]; 4] = [
@@ -430,6 +459,7 @@ impl Renderer {
             let mut prev_bg = (0u8, 0u8, 0u8);
             let mut first = true;
 
+            self.pad_line(pad);
             for cx in 0..cell_cols {
                 let x0 = cx * 2;
                 let y0 = cy * 3;
@@ -496,6 +526,7 @@ impl Renderer {
         stride: usize,
         rgb: &[u8],
         cols: usize,
+        pad: usize,
     ) {
         // 4x4 Bayer ordered dithering matrix
         const BAYER4: [[u8; 4]; 4] = [
@@ -513,6 +544,7 @@ impl Renderer {
             let mut prev_bg = (0u8, 0u8, 0u8);
             let mut first = true;
 
+            self.pad_line(pad);
             for cx in 0..cell_cols {
                 let x0 = cx * 2;
                 let y0 = cy * 4;
@@ -578,6 +610,7 @@ impl Renderer {
         th: usize,
         stride: usize,
         rgb: &[u8],
+        pad: usize,
     ) {
         use crate::kanji::{self, CELL};
 
@@ -618,6 +651,7 @@ impl Renderer {
             let mut prev_fg = (0u8, 0u8, 0u8);
             let mut first = true;
 
+            self.pad_line(pad);
             for cx in 0..kanji_cols {
                 let x0 = cx * CELL;
                 let y0 = cy * CELL;
