@@ -92,12 +92,18 @@ pub fn run_video(source: &str, mode: Mode, chars: &str, color: bool) -> Result<(
     let mut current_cols = cols;
 
     let frame_duration = player.frame_duration();
+    let mut paused = false;
 
     loop {
         let frame_start = std::time::Instant::now();
 
-        // Handle events (non-blocking)
-        while event::poll(std::time::Duration::ZERO)? {
+        // Handle events (block while paused, non-blocking while playing)
+        let poll_timeout = if paused {
+            std::time::Duration::from_millis(100)
+        } else {
+            std::time::Duration::ZERO
+        };
+        while event::poll(poll_timeout)? {
             match event::read()? {
                 Event::Key(key) => {
                     if key.code == KeyCode::Char('q')
@@ -112,6 +118,10 @@ pub fn run_video(source: &str, mode: Mode, chars: &str, color: bool) -> Result<(
                         )?;
                         terminal::disable_raw_mode()?;
                         return Ok(());
+                    }
+                    if key.code == KeyCode::Char(' ') {
+                        paused = !paused;
+                        break;
                     }
                     let seek_amount = if key.modifiers.contains(KeyModifiers::SHIFT) {
                         30.0
@@ -142,6 +152,15 @@ pub fn run_video(source: &str, mode: Mode, chars: &str, color: bool) -> Result<(
                 }
                 _ => {}
             }
+            // When paused, keep polling for events; when playing, drain and move on
+            if paused {
+                continue;
+            }
+            break;
+        }
+
+        if paused {
+            continue;
         }
 
         // Read and render frame
