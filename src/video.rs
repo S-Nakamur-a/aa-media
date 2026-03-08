@@ -1,0 +1,160 @@
+use std::io::Read;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+pub struct Player {
+    child: Child,
+    frame_buf: Vec<u8>,
+    frame_size: usize, // tw * th * 3
+    tw: u16,
+    th: u16,
+    fps: f64,
+    path: std::path::PathBuf,
+}
+
+impl Player {
+    pub fn new(path: &Path, tw: u16, th: u16) -> Result<Self, Box<dyn std::error::Error>> {
+        let fps = Self::probe_fps(path)?;
+        let frame_size = tw as usize * th as usize * 3;
+        let child = Self::spawn_ffmpeg(path, tw, th, fps)?;
+
+        Ok(Self {
+            child,
+            frame_buf: vec![0u8; frame_size],
+            frame_size,
+            tw,
+            th,
+            fps,
+            path: path.to_path_buf(),
+        })
+    }
+
+    pub fn frame_duration(&self) -> Duration {
+        Duration::from_secs_f64(1.0 / self.fps)
+    }
+
+    /// Restart ffmpeg with new dimensions on resize.
+    pub fn resize(&mut self, tw: u16, th: u16) -> Result<(), Box<dyn std::error::Error>> {
+        // Kill old process
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+
+        self.tw = tw;
+        self.th = th;
+        self.frame_size = tw as usize * th as usize * 3;
+        self.frame_buf.resize(self.frame_size, 0);
+
+        self.child = Self::spawn_ffmpeg(&self.path, tw, th, self.fps)?;
+        Ok(())
+    }
+
+    /// Read the next frame as raw RGB bytes.
+    pub fn next_frame(&mut self) -> Result<Option<&[u8]>, Box<dyn std::error::Error>> {
+        let stdout = self
+            .child
+            .stdout
+            .as_mut()
+            .ok_or("ffmpeg stdout not available")?;
+
+        // Read exactly one frame
+        let mut total = 0;
+        while total < self.frame_size {
+            match stdout.read(&mut self.frame_buf[total..self.frame_size]) {
+                Ok(0) => return Ok(None), // EOF
+                Ok(n) => total += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(Some(&self.frame_buf))
+    }
+
+    /// Probe video source dimensions (width, height).
+    pub fn probe_dimensions(path: &Path) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+        let output = Command::new("ffprobe")
+            .args([
+                "-v", "quiet",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0",
+            ])
+            .arg(path)
+            .output()?;
+
+        let s = String::from_utf8_lossy(&output.stdout);
+        let s = s.trim();
+        if let Some((w, h)) = s.split_once(',') {
+            Ok((w.parse().unwrap_or(640), h.parse().unwrap_or(480)))
+        } else {
+            Ok((640, 480))
+        }
+    }
+
+    fn probe_fps(path: &Path) -> Result<f64, Box<dyn std::error::Error>> {
+        let output = Command::new("ffprobe")
+            .args([
+                "-v", "quiet",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=r_frame_rate",
+                "-of", "csv=p=0",
+            ])
+            .arg(path)
+            .output()?;
+
+        let s = String::from_utf8_lossy(&output.stdout);
+        let s = s.trim();
+
+        let fps = if let Some((num, den)) = s.split_once('/') {
+            let n: f64 = num.parse().unwrap_or(30.0);
+            let d: f64 = den.parse().unwrap_or(1.0);
+            if d > 0.0 { n / d } else { 30.0 }
+        } else {
+            s.parse().unwrap_or(30.0)
+        };
+
+        Ok(fps.min(60.0))
+    }
+
+    fn spawn_ffmpeg(
+        path: &Path,
+        tw: u16,
+        th: u16,
+        fps: f64,
+    ) -> Result<Child, Box<dyn std::error::Error>> {
+        let fps_str = format!("{fps:.2}");
+        let size = format!("{}x{}", tw, th);
+
+        let child = Command::new("ffmpeg")
+            .args([
+                "-i",
+            ])
+            .arg(path)
+            .args([
+                "-vf",
+                &format!("scale={size}:flags=fast_bilinear,fps={fps_str}"),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-v",
+                "quiet",
+                "-nostats",
+                "-",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null())
+            .spawn()?;
+
+        Ok(child)
+    }
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
