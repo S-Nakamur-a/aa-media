@@ -25,9 +25,9 @@ struct Cli {
     #[arg(short, long, default_value = "braille")]
     mode: String,
 
-    /// Enable color output (default is grayscale)
+    /// Disable color output (use grayscale)
     #[arg(long)]
-    color: bool,
+    grayscale: bool,
 
     /// Custom ASCII character ramp (darkest to brightest)
     #[arg(long, default_value = " .:-=+*#%@")]
@@ -43,7 +43,7 @@ fn main() {
         "kanji" => Mode::Kanji,
         _ => Mode::Tile,
     };
-    let color = cli.color;
+    let color = !cli.grayscale;
 
     let resolved = match url::resolve(&cli.file) {
         Ok(r) => r,
