@@ -7,6 +7,8 @@ pub enum Mode {
     Ascii,
     Tile,
     Braille,
+    Sextant,
+    Octant,
     Kanji,
 }
 
@@ -37,7 +39,8 @@ impl Renderer {
         match self.mode {
             Mode::Tile => (cols, rows * 2),
             Mode::Ascii => (cols, rows),
-            Mode::Braille => (cols * 2, rows * 4),
+            Mode::Sextant => (cols * 2, rows * 3),
+            Mode::Braille | Mode::Octant => (cols * 2, rows * 4),
             // Each kanji = 2 terminal columns; CELL×CELL pixels per kanji cell
             Mode::Kanji => {
                 let cell = crate::kanji::CELL as u16;
@@ -57,21 +60,22 @@ impl Renderer {
         let pixel_rows = match self.mode {
             Mode::Tile => rows as u32 * 2,
             Mode::Ascii => rows as u32,
-            Mode::Braille => rows as u32 * 4,
+            Mode::Sextant => rows as u32 * 3,
+            Mode::Braille | Mode::Octant => rows as u32 * 4,
             Mode::Kanji => rows as u32 * cell,
         };
         let pixel_cols = match self.mode {
-            Mode::Braille => cols as u32 * 2,
+            Mode::Sextant | Mode::Braille | Mode::Octant => cols as u32 * 2,
             Mode::Kanji => (cols as u32 / 2) * cell,
             _ => cols as u32,
         };
 
         // Terminal chars are roughly 1:2 (width:height).
-        // In color mode, half-blocks compensate vertically.
-        // In ascii mode, we need aspect correction: each char covers ~2x height vs width.
-        // In braille mode, 2x4 dots per cell → effective aspect is 1:1.
+        // Aspect correction = sub_pixel_h / (2 * sub_pixel_w) = ph / (2 * pw)
+        // where pw×ph is the sub-pixel grid per cell.
         let aspect_correction = match self.mode {
-            Mode::Tile | Mode::Braille | Mode::Kanji => 1.0_f64,
+            Mode::Tile | Mode::Braille | Mode::Octant | Mode::Kanji => 1.0_f64,
+            Mode::Sextant => 0.75, // 2×3 grid: 3/(2*2) = 0.75
             Mode::Ascii => 0.5,
         };
 
@@ -132,6 +136,12 @@ impl Renderer {
             }
             Mode::Braille => {
                 self.render_braille(tw, th, stride, rgb, cols);
+            }
+            Mode::Sextant => {
+                self.render_sextant(tw, th, stride, rgb, cols);
+            }
+            Mode::Octant => {
+                self.render_octant(tw, th, stride, rgb, cols);
             }
             Mode::Kanji => {
                 self.render_kanji(tw, th, stride, rgb);
@@ -361,6 +371,172 @@ impl Renderer {
         self.buf.push_str("\x1b[0K\x1b[J");
     }
 
+    fn render_sextant(
+        &mut self,
+        tw: usize,
+        th: usize,
+        stride: usize,
+        rgb: &[u8],
+        cols: usize,
+    ) {
+        // 4x4 Bayer ordered dithering matrix
+        const BAYER4: [[u8; 4]; 4] = [
+            [  0, 128,  32, 160],
+            [192,  64, 224,  96],
+            [ 48, 176,  16, 144],
+            [240, 112, 208,  80],
+        ];
+
+        let cell_cols = (tw / 2).min(cols);
+        let cell_rows = th / 3;
+
+        for cy in 0..cell_rows {
+            let mut prev_fg = (0u8, 0u8, 0u8);
+            let mut prev_bg = (0u8, 0u8, 0u8);
+            let mut first = true;
+
+            for cx in 0..cell_cols {
+                let x0 = cx * 2;
+                let y0 = cy * 3;
+                let mut bits: u8 = 0;
+                let mut fg_r: u32 = 0; let mut fg_g: u32 = 0; let mut fg_b: u32 = 0; let mut fg_n: u32 = 0;
+                let mut bg_r: u32 = 0; let mut bg_g: u32 = 0; let mut bg_b: u32 = 0; let mut bg_n: u32 = 0;
+
+                // Row-major bit mapping: bit = dy * 2 + dx
+                for dy in 0..3usize {
+                    for dx in 0..2usize {
+                        let px = x0 + dx;
+                        let py = y0 + dy;
+                        let off = py * stride + px * 3;
+                        let (r, g, b) = if off + 2 < rgb.len() {
+                            (rgb[off] as u32, rgb[off + 1] as u32, rgb[off + 2] as u32)
+                        } else {
+                            (0, 0, 0)
+                        };
+                        let lum = (r * 77 + g * 150 + b * 29) >> 8;
+                        let threshold = BAYER4[py % 4][px % 4] as u32;
+                        if lum > threshold {
+                            bits |= 1u8 << (dy * 2 + dx);
+                            fg_r += r; fg_g += g; fg_b += b; fg_n += 1;
+                        } else {
+                            bg_r += r; bg_g += g; bg_b += b; bg_n += 1;
+                        }
+                    }
+                }
+
+                if self.color {
+                    let fg = if fg_n > 0 {
+                        ((fg_r / fg_n) as u8, (fg_g / fg_n) as u8, (fg_b / fg_n) as u8)
+                    } else { (0, 0, 0) };
+                    let bg = if bg_n > 0 {
+                        ((bg_r / bg_n) as u8, (bg_g / bg_n) as u8, (bg_b / bg_n) as u8)
+                    } else { (0, 0, 0) };
+                    if first || fg != prev_fg || bg != prev_bg {
+                        use std::fmt::Write;
+                        let _ = write!(
+                            self.buf,
+                            "\x1b[38;2;{};{};{};48;2;{};{};{}m",
+                            fg.0, fg.1, fg.2, bg.0, bg.1, bg.2
+                        );
+                        prev_fg = fg;
+                        prev_bg = bg;
+                        first = false;
+                    }
+                }
+
+                self.buf.push(sextant_char(bits));
+            }
+            self.buf.push_str("\x1b[0m");
+            if cy + 1 < cell_rows {
+                self.buf.push_str("\x1b[0K\r\n");
+            }
+        }
+        self.buf.push_str("\x1b[0K\x1b[J");
+    }
+
+    fn render_octant(
+        &mut self,
+        tw: usize,
+        th: usize,
+        stride: usize,
+        rgb: &[u8],
+        cols: usize,
+    ) {
+        // 4x4 Bayer ordered dithering matrix
+        const BAYER4: [[u8; 4]; 4] = [
+            [  0, 128,  32, 160],
+            [192,  64, 224,  96],
+            [ 48, 176,  16, 144],
+            [240, 112, 208,  80],
+        ];
+
+        let cell_cols = (tw / 2).min(cols);
+        let cell_rows = th / 4;
+
+        for cy in 0..cell_rows {
+            let mut prev_fg = (0u8, 0u8, 0u8);
+            let mut prev_bg = (0u8, 0u8, 0u8);
+            let mut first = true;
+
+            for cx in 0..cell_cols {
+                let x0 = cx * 2;
+                let y0 = cy * 4;
+                let mut bits: u8 = 0;
+                let mut fg_r: u32 = 0; let mut fg_g: u32 = 0; let mut fg_b: u32 = 0; let mut fg_n: u32 = 0;
+                let mut bg_r: u32 = 0; let mut bg_g: u32 = 0; let mut bg_b: u32 = 0; let mut bg_n: u32 = 0;
+
+                // Row-major bit mapping: bit = dy * 2 + dx
+                for dy in 0..4usize {
+                    for dx in 0..2usize {
+                        let px = x0 + dx;
+                        let py = y0 + dy;
+                        let off = py * stride + px * 3;
+                        let (r, g, b) = if off + 2 < rgb.len() {
+                            (rgb[off] as u32, rgb[off + 1] as u32, rgb[off + 2] as u32)
+                        } else {
+                            (0, 0, 0)
+                        };
+                        let lum = (r * 77 + g * 150 + b * 29) >> 8;
+                        let threshold = BAYER4[py % 4][px % 4] as u32;
+                        if lum > threshold {
+                            bits |= 1u8 << (dy * 2 + dx);
+                            fg_r += r; fg_g += g; fg_b += b; fg_n += 1;
+                        } else {
+                            bg_r += r; bg_g += g; bg_b += b; bg_n += 1;
+                        }
+                    }
+                }
+
+                if self.color {
+                    let fg = if fg_n > 0 {
+                        ((fg_r / fg_n) as u8, (fg_g / fg_n) as u8, (fg_b / fg_n) as u8)
+                    } else { (0, 0, 0) };
+                    let bg = if bg_n > 0 {
+                        ((bg_r / bg_n) as u8, (bg_g / bg_n) as u8, (bg_b / bg_n) as u8)
+                    } else { (0, 0, 0) };
+                    if first || fg != prev_fg || bg != prev_bg {
+                        use std::fmt::Write;
+                        let _ = write!(
+                            self.buf,
+                            "\x1b[38;2;{};{};{};48;2;{};{};{}m",
+                            fg.0, fg.1, fg.2, bg.0, bg.1, bg.2
+                        );
+                        prev_fg = fg;
+                        prev_bg = bg;
+                        first = false;
+                    }
+                }
+
+                self.buf.push(octant_char(bits));
+            }
+            self.buf.push_str("\x1b[0m");
+            if cy + 1 < cell_rows {
+                self.buf.push_str("\x1b[0K\r\n");
+            }
+        }
+        self.buf.push_str("\x1b[0K\x1b[J");
+    }
+
     fn render_kanji(
         &mut self,
         tw: usize,
@@ -468,5 +644,75 @@ impl Renderer {
             }
         }
         self.buf.push_str("\x1b[0K\x1b[J");
+    }
+}
+
+/// Map a 6-bit sextant pattern (row-major 2×3 grid) to the corresponding Unicode character.
+/// Grid bit layout:
+///   bit0 | bit1
+///   bit2 | bit3
+///   bit4 | bit5
+fn sextant_char(pattern: u8) -> char {
+    match pattern & 0x3F {
+        0 => ' ',
+        21 => '\u{258C}', // ▌ LEFT HALF BLOCK
+        42 => '\u{2590}', // ▐ RIGHT HALF BLOCK
+        63 => '\u{2588}', // █ FULL BLOCK
+        p => {
+            // U+1FB00..U+1FB3B has 60 sextant chars for patterns 1..62 excluding 21 and 42
+            let skip = if p > 42 { 2 } else if p > 21 { 1 } else { 0 };
+            char::from_u32(0x1FB00 + (p as u32 - 1) - skip).unwrap()
+        }
+    }
+}
+
+/// Map an 8-bit octant pattern (row-major 2×4 grid) to the corresponding Unicode character.
+/// Grid bit layout:
+///   bit0 | bit1
+///   bit2 | bit3
+///   bit4 | bit5
+///   bit6 | bit7
+fn octant_char(pattern: u8) -> char {
+    // 20 patterns already in Block Elements / Legacy Computing
+    // 6 patterns in other SLC positions
+    // 230 patterns sequentially at U+1CD00..U+1CDE5
+    match pattern {
+        0x00 => ' ',
+        0x03 => '\u{1FB82}', // UPPER ONE QUARTER BLOCK
+        0x05 => '\u{2598}',  // QUADRANT UPPER LEFT
+        0x0A => '\u{259D}',  // QUADRANT UPPER RIGHT
+        0x0F => '\u{2580}',  // UPPER HALF BLOCK
+        0x3F => '\u{1FB85}', // UPPER THREE QUARTERS BLOCK
+        0x50 => '\u{2596}',  // QUADRANT LOWER LEFT
+        0x55 => '\u{258C}',  // LEFT HALF BLOCK
+        0x5A => '\u{259E}',  // QUADRANT UPPER RIGHT AND LOWER LEFT
+        0x5F => '\u{259B}',  // QUADRANT UPPER LEFT AND UPPER RIGHT AND LOWER LEFT
+        0xA0 => '\u{2597}',  // QUADRANT LOWER RIGHT
+        0xA5 => '\u{259A}',  // QUADRANT UPPER LEFT AND LOWER RIGHT
+        0xAA => '\u{2590}',  // RIGHT HALF BLOCK
+        0xAF => '\u{259C}',  // QUADRANT UPPER LEFT AND UPPER RIGHT AND LOWER RIGHT
+        0xC0 => '\u{2582}',  // LOWER ONE QUARTER BLOCK
+        0xF0 => '\u{2584}',  // LOWER HALF BLOCK
+        0xF5 => '\u{2599}',  // QUADRANT UPPER LEFT AND LOWER LEFT AND LOWER RIGHT
+        0xFA => '\u{259F}',  // QUADRANT UPPER RIGHT AND LOWER LEFT AND LOWER RIGHT
+        0xFC => '\u{2586}',  // LOWER THREE QUARTERS BLOCK
+        0xFF => '\u{2588}',  // FULL BLOCK
+        // 6 patterns in other Legacy Computing positions
+        0x01 => '\u{1CEA8}',
+        0x02 => '\u{1CEAB}',
+        0x14 => '\u{1FBE6}',
+        0x28 => '\u{1FBE7}',
+        0x40 => '\u{1CEA3}',
+        0x80 => '\u{1CEA0}',
+        // Remaining 230 patterns: U+1CD00 + sequential index
+        p => {
+            const SKIP: [u8; 26] = [
+                0x00, 0x01, 0x02, 0x03, 0x05, 0x0A, 0x0F, 0x14, 0x28, 0x3F,
+                0x40, 0x50, 0x55, 0x5A, 0x5F, 0x80, 0xA0, 0xA5, 0xAA, 0xAF,
+                0xC0, 0xF0, 0xF5, 0xFA, 0xFC, 0xFF,
+            ];
+            let below = SKIP.iter().filter(|&&s| s < p).count() as u32;
+            char::from_u32(0x1CD00 + p as u32 - below).unwrap()
+        }
     }
 }

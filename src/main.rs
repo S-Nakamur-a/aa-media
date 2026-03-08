@@ -21,7 +21,7 @@ struct Cli {
     /// Path or URL to image/video (supports local files, image URLs, YouTube URLs, and web pages)
     file: String,
 
-    /// Rendering mode: ascii, tile, braille, kanji
+    /// Rendering mode: ascii, tile, braille, sextant, octant, kanji
     #[arg(short, long, default_value = "braille")]
     mode: String,
 
@@ -40,6 +40,8 @@ fn main() {
     let mode = match cli.mode.as_str() {
         "ascii" => Mode::Ascii,
         "braille" => Mode::Braille,
+        "sextant" => Mode::Sextant,
+        "octant" => Mode::Octant,
         "kanji" => Mode::Kanji,
         _ => Mode::Tile,
     };
