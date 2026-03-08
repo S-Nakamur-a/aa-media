@@ -21,9 +21,13 @@ struct Cli {
     /// Path or URL to image/video (supports local files, image URLs, YouTube URLs, and web pages)
     file: String,
 
-    /// Rendering mode: ascii, color, braille, kanji
+    /// Rendering mode: ascii, tile, braille, kanji
     #[arg(short, long, default_value = "braille")]
     mode: String,
+
+    /// Enable color output (default is grayscale)
+    #[arg(long)]
+    color: bool,
 
     /// Custom ASCII character ramp (darkest to brightest)
     #[arg(long, default_value = " .:-=+*#%@")]
@@ -37,8 +41,9 @@ fn main() {
         "ascii" => Mode::Ascii,
         "braille" => Mode::Braille,
         "kanji" => Mode::Kanji,
-        _ => Mode::Color,
+        _ => Mode::Tile,
     };
+    let color = cli.color;
 
     let resolved = match url::resolve(&cli.file) {
         Ok(r) => r,
@@ -49,9 +54,9 @@ fn main() {
     };
 
     let result = if resolved.is_video {
-        run_video(&resolved.source, mode, &cli.chars)
+        run_video(&resolved.source, mode, &cli.chars, color)
     } else {
-        run_image(&resolved.source, mode, &cli.chars)
+        run_image(&resolved.source, mode, &cli.chars, color)
     };
 
     if let Err(e) = result {
@@ -62,7 +67,7 @@ fn main() {
     }
 }
 
-fn run_image(path: &str, mode: Mode, chars: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn run_image(path: &str, mode: Mode, chars: &str, color: bool) -> Result<(), Box<dyn std::error::Error>> {
     let img = image::open(Path::new(path))?.into_rgb8();
     let src_w = img.width();
     let src_h = img.height();
@@ -71,7 +76,7 @@ fn run_image(path: &str, mode: Mode, chars: &str) -> Result<(), Box<dyn std::err
     terminal::enable_raw_mode()?;
     crossterm::execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
 
-    let mut renderer = Renderer::new(mode, chars);
+    let mut renderer = Renderer::new(mode, chars, color);
 
     let render_image =
         |stdout: &mut io::BufWriter<io::StdoutLock>, renderer: &mut Renderer| -> Result<(), Box<dyn std::error::Error>> {
@@ -116,13 +121,13 @@ fn run_image(path: &str, mode: Mode, chars: &str) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-fn run_video(source: &str, mode: Mode, chars: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn run_video(source: &str, mode: Mode, chars: &str, color: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = io::BufWriter::with_capacity(1 << 17, io::stdout().lock());
 
     terminal::enable_raw_mode()?;
     crossterm::execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
 
-    let mut renderer = Renderer::new(mode, chars);
+    let mut renderer = Renderer::new(mode, chars, color);
     let (src_w, src_h) = video::Player::probe_dimensions(source)?;
     let (cols, rows) = terminal::size()?;
     let (tw, th) = renderer.target_size_fit(cols, rows, src_w, src_h);
@@ -196,7 +201,7 @@ fn run_video(source: &str, mode: Mode, chars: &str) -> Result<(), Box<dyn std::e
                 let pos = player.position();
                 let dur = player.duration();
                 if dur > 0.0 {
-                    let bar_width = cols_now as usize - 14; // space for time display
+                    let bar_width = (cols_now as usize).saturating_sub(14); // space for time display
                     let filled = ((pos / dur) * bar_width as f64) as usize;
                     let pos_min = pos as u32 / 60;
                     let pos_sec = pos as u32 % 60;

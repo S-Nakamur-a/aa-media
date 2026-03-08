@@ -162,6 +162,7 @@ fn chromium_args<'a>(url: &'a str, dest: &'a Path) -> Vec<String> {
         "--disable-gpu".to_string(),
         "--no-sandbox".to_string(),
         "--hide-scrollbars".to_string(),
+        "--".to_string(),
         url.to_string(),
     ]
 }

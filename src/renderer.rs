@@ -5,22 +5,24 @@ use image::RgbImage;
 #[derive(Clone, Copy)]
 pub enum Mode {
     Ascii,
-    Color,
+    Tile,
     Braille,
     Kanji,
 }
 
 pub struct Renderer {
     mode: Mode,
+    color: bool,
     chars: Vec<char>,
     buf: String,
     lum_buf: Vec<u8>,
 }
 
 impl Renderer {
-    pub fn new(mode: Mode, chars: &str) -> Self {
+    pub fn new(mode: Mode, chars: &str, color: bool) -> Self {
         Self {
             mode,
+            color,
             chars: chars.chars().collect(),
             buf: String::with_capacity(1 << 16),
             lum_buf: Vec::new(),
@@ -29,11 +31,11 @@ impl Renderer {
 
     /// Calculate pixel dimensions needed for the terminal size, preserving aspect ratio.
     /// `src_w`/`src_h` are source dimensions (0 means fill terminal).
-    /// In Color mode, each cell shows 2 vertical pixels using half-block chars.
+    /// In Tile mode, each cell shows 2 vertical pixels using half-block chars.
     /// In Ascii mode, each cell shows 1 pixel with ~2:1 aspect correction.
     pub fn target_size(&self, cols: u16, rows: u16) -> (u16, u16) {
         match self.mode {
-            Mode::Color => (cols, rows * 2),
+            Mode::Tile => (cols, rows * 2),
             Mode::Ascii => (cols, rows),
             Mode::Braille => (cols * 2, rows * 4),
             // Each kanji = 2 terminal columns; CELL×CELL pixels per kanji cell
@@ -53,7 +55,7 @@ impl Renderer {
         // Pixel height available
         let cell = crate::kanji::CELL as u32;
         let pixel_rows = match self.mode {
-            Mode::Color => rows as u32 * 2,
+            Mode::Tile => rows as u32 * 2,
             Mode::Ascii => rows as u32,
             Mode::Braille => rows as u32 * 4,
             Mode::Kanji => rows as u32 * cell,
@@ -69,7 +71,7 @@ impl Renderer {
         // In ascii mode, we need aspect correction: each char covers ~2x height vs width.
         // In braille mode, 2x4 dots per cell → effective aspect is 1:1.
         let aspect_correction = match self.mode {
-            Mode::Color | Mode::Braille | Mode::Kanji => 1.0_f64,
+            Mode::Tile | Mode::Braille | Mode::Kanji => 1.0_f64,
             Mode::Ascii => 0.5,
         };
 
@@ -125,8 +127,8 @@ impl Renderer {
             Mode::Ascii => {
                 self.render_ascii(tw, th, stride, rgb, cols);
             }
-            Mode::Color => {
-                self.render_color(tw, th, stride, rgb, cols);
+            Mode::Tile => {
+                self.render_tile(tw, th, stride, rgb, cols);
             }
             Mode::Braille => {
                 self.render_braille(tw, th, stride, rgb, cols);
@@ -174,7 +176,7 @@ impl Renderer {
         self.buf.push_str("\x1b[0K\x1b[J");
     }
 
-    fn render_color(
+    fn render_tile(
         &mut self,
         tw: usize,
         th: usize,
@@ -212,8 +214,18 @@ impl Renderer {
                     (0, 0, 0)
                 };
 
-                let fg = (tr, tg, tb);
-                let bg_color = (br, bg, bb);
+                let fg = if self.color {
+                    (tr, tg, tb)
+                } else {
+                    let l = ((tr as u32 * 77 + tg as u32 * 150 + tb as u32 * 29) >> 8) as u8;
+                    (l, l, l)
+                };
+                let bg_color = if self.color {
+                    (br, bg, bb)
+                } else {
+                    let l = ((br as u32 * 77 + bg as u32 * 150 + bb as u32 * 29) >> 8) as u8;
+                    (l, l, l)
+                };
 
                 // Only emit escape codes when color changes
                 if first || fg != prev_fg || bg_color != prev_bg {
@@ -303,7 +315,7 @@ impl Renderer {
                     }
                 }
 
-                if count > 0 {
+                if count > 0 && self.color {
                     let fg = (
                         (sr / count) as u8,
                         (sg / count) as u8,
@@ -319,7 +331,7 @@ impl Renderer {
                         prev_fg = fg;
                         first = false;
                     }
-                } else if !first {
+                } else if !first && self.color {
                     self.buf.push_str("\x1b[0m");
                     first = true;
                 }
