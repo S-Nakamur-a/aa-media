@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[lib]
+name = "aa_media"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aa-media"
+path = "src/main.rs"
+
 [dependencies]
 crossterm = "0.28"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
