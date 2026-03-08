@@ -1,9 +1,10 @@
 mod kanji;
 mod renderer;
+mod url;
 mod video;
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::Path;
 
 use clap::Parser;
 use crossterm::{
@@ -17,8 +18,8 @@ use renderer::{Mode, Renderer};
 #[derive(Parser)]
 #[command(name = "aa-media", about = "Display images/videos as ASCII art in the terminal")]
 struct Cli {
-    /// Path to image or video file
-    file: PathBuf,
+    /// Path or URL to image/video (supports local files, image URLs, YouTube URLs, and web pages)
+    file: String,
 
     /// Rendering mode: ascii, color, braille, kanji
     #[arg(short, long, default_value = "braille")]
@@ -39,26 +40,21 @@ fn main() {
         _ => Mode::Color,
     };
 
-    let ext = cli
-        .file
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let resolved = match url::resolve(&cli.file) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error resolving input: {e}");
+            std::process::exit(1);
+        }
+    };
 
-    let is_video = matches!(
-        ext.as_str(),
-        "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "wmv" | "m4v" | "ts" | "gif"
-    );
-
-    let result = if is_video {
-        run_video(&cli.file, mode, &cli.chars)
+    let result = if resolved.is_video {
+        run_video(&resolved.source, mode, &cli.chars)
     } else {
-        run_image(&cli.file, mode, &cli.chars)
+        run_image(&resolved.source, mode, &cli.chars)
     };
 
     if let Err(e) = result {
-        // Ensure terminal is restored on error
         let _ = crossterm::execute!(io::stdout(), terminal::LeaveAlternateScreen, cursor::Show);
         let _ = terminal::disable_raw_mode();
         eprintln!("Error: {e}");
@@ -66,8 +62,8 @@ fn main() {
     }
 }
 
-fn run_image(path: &PathBuf, mode: Mode, chars: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let img = image::open(path)?.into_rgb8();
+fn run_image(path: &str, mode: Mode, chars: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let img = image::open(Path::new(path))?.into_rgb8();
     let src_w = img.width();
     let src_h = img.height();
     let mut stdout = io::BufWriter::with_capacity(1 << 16, io::stdout().lock());
@@ -120,18 +116,18 @@ fn run_image(path: &PathBuf, mode: Mode, chars: &str) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-fn run_video(path: &PathBuf, mode: Mode, chars: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn run_video(source: &str, mode: Mode, chars: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = io::BufWriter::with_capacity(1 << 17, io::stdout().lock());
 
     terminal::enable_raw_mode()?;
     crossterm::execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
 
     let mut renderer = Renderer::new(mode, chars);
-    let (src_w, src_h) = video::Player::probe_dimensions(path)?;
+    let (src_w, src_h) = video::Player::probe_dimensions(source)?;
     let (cols, rows) = terminal::size()?;
     let (tw, th) = renderer.target_size_fit(cols, rows, src_w, src_h);
 
-    let mut player = video::Player::new(path, tw, th)?;
+    let mut player = video::Player::new(source, tw, th)?;
     let mut current_tw = tw;
     let mut current_th = th;
     let mut current_cols = cols;
@@ -224,7 +220,6 @@ fn run_video(path: &PathBuf, mode: Mode, chars: &str) -> Result<(), Box<dyn std:
         let elapsed = frame_start.elapsed();
         if elapsed < frame_duration {
             let remaining = frame_duration - elapsed;
-            // Sleep most of the time to save CPU, spin the last 2ms for precision
             if remaining > std::time::Duration::from_millis(2) {
                 std::thread::sleep(remaining - std::time::Duration::from_millis(2));
             }

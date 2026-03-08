@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -10,17 +9,17 @@ pub struct Player {
     tw: u16,
     th: u16,
     fps: f64,
-    path: std::path::PathBuf,
+    source: String,
     position: f64,   // current playback position in seconds
     duration: f64,    // total duration in seconds
 }
 
 impl Player {
-    pub fn new(path: &Path, tw: u16, th: u16) -> Result<Self, Box<dyn std::error::Error>> {
-        let fps = Self::probe_fps(path)?;
-        let duration = Self::probe_duration(path)?;
+    pub fn new(source: &str, tw: u16, th: u16) -> Result<Self, Box<dyn std::error::Error>> {
+        let fps = Self::probe_fps(source)?;
+        let duration = Self::probe_duration(source)?;
         let frame_size = tw as usize * th as usize * 3;
-        let child = Self::spawn_ffmpeg(path, tw, th, fps, 0.0)?;
+        let child = Self::spawn_ffmpeg(source, tw, th, fps, 0.0)?;
 
         Ok(Self {
             child,
@@ -29,7 +28,7 @@ impl Player {
             tw,
             th,
             fps,
-            path: path.to_path_buf(),
+            source: source.to_string(),
             position: 0.0,
             duration,
         })
@@ -54,7 +53,7 @@ impl Player {
         let _ = self.child.wait();
 
         self.position = pos;
-        self.child = Self::spawn_ffmpeg(&self.path, self.tw, self.th, self.fps, pos)?;
+        self.child = Self::spawn_ffmpeg(&self.source, self.tw, self.th, self.fps, pos)?;
         Ok(())
     }
 
@@ -73,7 +72,7 @@ impl Player {
         self.frame_size = tw as usize * th as usize * 3;
         self.frame_buf.resize(self.frame_size, 0);
 
-        self.child = Self::spawn_ffmpeg(&self.path, tw, th, self.fps, self.position)?;
+        self.child = Self::spawn_ffmpeg(&self.source, tw, th, self.fps, self.position)?;
         Ok(())
     }
 
@@ -102,7 +101,7 @@ impl Player {
     }
 
     /// Probe video source dimensions (width, height).
-    pub fn probe_dimensions(path: &Path) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+    pub fn probe_dimensions(source: &str) -> Result<(u32, u32), Box<dyn std::error::Error>> {
         let output = Command::new("ffprobe")
             .args([
                 "-v", "quiet",
@@ -110,7 +109,7 @@ impl Player {
                 "-show_entries", "stream=width,height",
                 "-of", "csv=p=0",
             ])
-            .arg(path)
+            .arg(source)
             .output()?;
 
         let s = String::from_utf8_lossy(&output.stdout);
@@ -122,21 +121,21 @@ impl Player {
         }
     }
 
-    fn probe_duration(path: &Path) -> Result<f64, Box<dyn std::error::Error>> {
+    fn probe_duration(source: &str) -> Result<f64, Box<dyn std::error::Error>> {
         let output = Command::new("ffprobe")
             .args([
                 "-v", "quiet",
                 "-show_entries", "format=duration",
                 "-of", "csv=p=0",
             ])
-            .arg(path)
+            .arg(source)
             .output()?;
 
         let s = String::from_utf8_lossy(&output.stdout);
         Ok(s.trim().parse().unwrap_or(0.0))
     }
 
-    fn probe_fps(path: &Path) -> Result<f64, Box<dyn std::error::Error>> {
+    fn probe_fps(source: &str) -> Result<f64, Box<dyn std::error::Error>> {
         let output = Command::new("ffprobe")
             .args([
                 "-v", "quiet",
@@ -144,7 +143,7 @@ impl Player {
                 "-show_entries", "stream=r_frame_rate",
                 "-of", "csv=p=0",
             ])
-            .arg(path)
+            .arg(source)
             .output()?;
 
         let s = String::from_utf8_lossy(&output.stdout);
@@ -162,7 +161,7 @@ impl Player {
     }
 
     fn spawn_ffmpeg(
-        path: &Path,
+        source: &str,
         tw: u16,
         th: u16,
         fps: f64,
@@ -179,7 +178,7 @@ impl Player {
 
         let child = cmd
             .arg("-i")
-            .arg(path)
+            .arg(source)
             .args([
                 "-vf",
                 &format!("scale={size}:flags=fast_bilinear,fps={fps_str}"),
