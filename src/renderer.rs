@@ -154,6 +154,8 @@ impl Renderer {
         for y in 0..th {
             let row_off = y * stride;
             let line_width = tw.min(cols);
+            let mut prev_fg = (0u8, 0u8, 0u8);
+            let mut first = true;
             for x in 0..line_width {
                 let off = row_off + x * 3;
                 if off + 2 >= rgb.len() {
@@ -166,7 +168,19 @@ impl Renderer {
                 // Fast luminance approximation
                 let lum = (r * 77 + g * 150 + b * 29) >> 8;
                 let idx = (lum as usize * (ramp_len - 1)) / 255;
+                if self.color {
+                    let fg = (rgb[off], rgb[off + 1], rgb[off + 2]);
+                    if first || fg != prev_fg {
+                        use std::fmt::Write;
+                        let _ = write!(self.buf, "\x1b[38;2;{};{};{}m", fg.0, fg.1, fg.2);
+                        prev_fg = fg;
+                        first = false;
+                    }
+                }
                 self.buf.push(self.chars[idx]);
+            }
+            if self.color {
+                self.buf.push_str("\x1b[0m");
             }
             if y + 1 < th {
                 self.buf.push_str("\x1b[0K\r\n");
@@ -272,10 +286,10 @@ impl Renderer {
             [240, 112, 208,  80],
         ];
 
-        // Gamma LUT to brighten dark areas (gamma ≈ 0.6)
+        // Gamma LUT to brighten dark areas (gamma ≈ 0.3)
         // This compensates for braille's binary dots making dark areas too black.
         let gamma_lut: [u8; 256] = std::array::from_fn(|i| {
-            ((i as f32 / 255.0).powf(0.6) * 255.0) as u8
+            ((i as f32 / 255.0).powf(0.3) * 255.0) as u8
         });
 
         let cell_cols = (tw / 2).min(cols);
@@ -378,7 +392,12 @@ impl Renderer {
             }
         }
 
+        let cell_pixels = (CELL * CELL) as u32;
+
         for cy in 0..kanji_rows {
+            let mut prev_fg = (0u8, 0u8, 0u8);
+            let mut first = true;
+
             for cx in 0..kanji_cols {
                 let x0 = cx * CELL;
                 let y0 = cy * CELL;
@@ -409,7 +428,40 @@ impl Renderer {
 
                 let dir = kanji::classify(gx, gy);
                 let ch = kanji::lookup(density, dir);
+
+                if self.color {
+                    // Average color over the cell
+                    let mut sr: u32 = 0;
+                    let mut sg: u32 = 0;
+                    let mut sb: u32 = 0;
+                    for dy in 0..CELL {
+                        let row_off = (y0 + dy) * stride;
+                        for dx in 0..CELL {
+                            let off = row_off + (x0 + dx) * 3;
+                            if off + 2 < rgb.len() {
+                                sr += rgb[off] as u32;
+                                sg += rgb[off + 1] as u32;
+                                sb += rgb[off + 2] as u32;
+                            }
+                        }
+                    }
+                    let fg = (
+                        (sr / cell_pixels) as u8,
+                        (sg / cell_pixels) as u8,
+                        (sb / cell_pixels) as u8,
+                    );
+                    if first || fg != prev_fg {
+                        use std::fmt::Write;
+                        let _ = write!(self.buf, "\x1b[38;2;{};{};{}m", fg.0, fg.1, fg.2);
+                        prev_fg = fg;
+                        first = false;
+                    }
+                }
+
                 self.buf.push(ch);
+            }
+            if self.color {
+                self.buf.push_str("\x1b[0m");
             }
             if cy + 1 < kanji_rows {
                 self.buf.push_str("\x1b[0K\r\n");
