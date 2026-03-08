@@ -1,3 +1,4 @@
+mod kanji;
 mod renderer;
 mod video;
 
@@ -19,8 +20,8 @@ struct Cli {
     /// Path to image or video file
     file: PathBuf,
 
-    /// Rendering mode: "ascii" for pure ASCII, "color" for truecolor half-block
-    #[arg(short, long, default_value = "color")]
+    /// Rendering mode: ascii, color, braille, kanji
+    #[arg(short, long, default_value = "braille")]
     mode: String,
 
     /// Custom ASCII character ramp (darkest to brightest)
@@ -33,6 +34,8 @@ fn main() {
 
     let mode = match cli.mode.as_str() {
         "ascii" => Mode::Ascii,
+        "braille" => Mode::Braille,
+        "kanji" => Mode::Kanji,
         _ => Mode::Color,
     };
 
@@ -155,6 +158,22 @@ fn run_video(path: &PathBuf, mode: Mode, chars: &str) -> Result<(), Box<dyn std:
                         terminal::disable_raw_mode()?;
                         return Ok(());
                     }
+                    let seek_amount = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        30.0
+                    } else {
+                        5.0
+                    };
+                    match key.code {
+                        KeyCode::Right => {
+                            player.seek_relative(seek_amount)?;
+                            write!(stdout, "\x1b[2J")?;
+                        }
+                        KeyCode::Left => {
+                            player.seek_relative(-seek_amount)?;
+                            write!(stdout, "\x1b[2J")?;
+                        }
+                        _ => {}
+                    }
                 }
                 Event::Resize(c, r) => {
                     let (nw, nh) = renderer.target_size_fit(c, r, src_w, src_h);
@@ -175,6 +194,27 @@ fn run_video(path: &PathBuf, mode: Mode, chars: &str) -> Result<(), Box<dyn std:
             Some(frame) => {
                 write!(stdout, "\x1b[H")?;
                 renderer.render_rgb_buffer(&mut stdout, frame, current_tw, current_th, current_cols)?;
+
+                // Draw progress bar on last row
+                let (cols_now, rows_now) = terminal::size()?;
+                let pos = player.position();
+                let dur = player.duration();
+                if dur > 0.0 {
+                    let bar_width = cols_now as usize - 14; // space for time display
+                    let filled = ((pos / dur) * bar_width as f64) as usize;
+                    let pos_min = pos as u32 / 60;
+                    let pos_sec = pos as u32 % 60;
+                    let dur_min = dur as u32 / 60;
+                    let dur_sec = dur as u32 % 60;
+                    write!(
+                        stdout,
+                        "\x1b[{};1H\x1b[0m {pos_min:02}:{pos_sec:02} \x1b[7m{}\x1b[0m{} {dur_min:02}:{dur_sec:02}",
+                        rows_now,
+                        " ".repeat(filled.min(bar_width)),
+                        " ".repeat(bar_width.saturating_sub(filled)),
+                    )?;
+                }
+
                 stdout.flush()?;
             }
             None => break,

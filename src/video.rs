@@ -11,13 +11,16 @@ pub struct Player {
     th: u16,
     fps: f64,
     path: std::path::PathBuf,
+    position: f64,   // current playback position in seconds
+    duration: f64,    // total duration in seconds
 }
 
 impl Player {
     pub fn new(path: &Path, tw: u16, th: u16) -> Result<Self, Box<dyn std::error::Error>> {
         let fps = Self::probe_fps(path)?;
+        let duration = Self::probe_duration(path)?;
         let frame_size = tw as usize * th as usize * 3;
-        let child = Self::spawn_ffmpeg(path, tw, th, fps)?;
+        let child = Self::spawn_ffmpeg(path, tw, th, fps, 0.0)?;
 
         Ok(Self {
             child,
@@ -27,6 +30,8 @@ impl Player {
             th,
             fps,
             path: path.to_path_buf(),
+            position: 0.0,
+            duration,
         })
     }
 
@@ -34,9 +39,32 @@ impl Player {
         Duration::from_secs_f64(1.0 / self.fps)
     }
 
+    pub fn duration(&self) -> f64 {
+        self.duration
+    }
+
+    pub fn position(&self) -> f64 {
+        self.position
+    }
+
+    /// Seek to a specific position in seconds.
+    pub fn seek(&mut self, position: f64) -> Result<(), Box<dyn std::error::Error>> {
+        let pos = position.max(0.0).min(self.duration);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+
+        self.position = pos;
+        self.child = Self::spawn_ffmpeg(&self.path, self.tw, self.th, self.fps, pos)?;
+        Ok(())
+    }
+
+    /// Seek relative to current position.
+    pub fn seek_relative(&mut self, delta: f64) -> Result<(), Box<dyn std::error::Error>> {
+        self.seek(self.position + delta)
+    }
+
     /// Restart ffmpeg with new dimensions on resize.
     pub fn resize(&mut self, tw: u16, th: u16) -> Result<(), Box<dyn std::error::Error>> {
-        // Kill old process
         let _ = self.child.kill();
         let _ = self.child.wait();
 
@@ -45,7 +73,7 @@ impl Player {
         self.frame_size = tw as usize * th as usize * 3;
         self.frame_buf.resize(self.frame_size, 0);
 
-        self.child = Self::spawn_ffmpeg(&self.path, tw, th, self.fps)?;
+        self.child = Self::spawn_ffmpeg(&self.path, tw, th, self.fps, self.position)?;
         Ok(())
     }
 
@@ -67,6 +95,8 @@ impl Player {
                 Err(e) => return Err(e.into()),
             }
         }
+
+        self.position += 1.0 / self.fps;
 
         Ok(Some(&self.frame_buf))
     }
@@ -90,6 +120,20 @@ impl Player {
         } else {
             Ok((640, 480))
         }
+    }
+
+    fn probe_duration(path: &Path) -> Result<f64, Box<dyn std::error::Error>> {
+        let output = Command::new("ffprobe")
+            .args([
+                "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+            ])
+            .arg(path)
+            .output()?;
+
+        let s = String::from_utf8_lossy(&output.stdout);
+        Ok(s.trim().parse().unwrap_or(0.0))
     }
 
     fn probe_fps(path: &Path) -> Result<f64, Box<dyn std::error::Error>> {
@@ -122,14 +166,19 @@ impl Player {
         tw: u16,
         th: u16,
         fps: f64,
+        start: f64,
     ) -> Result<Child, Box<dyn std::error::Error>> {
         let fps_str = format!("{fps:.2}");
         let size = format!("{}x{}", tw, th);
 
-        let child = Command::new("ffmpeg")
-            .args([
-                "-i",
-            ])
+        let mut cmd = Command::new("ffmpeg");
+
+        if start > 0.0 {
+            cmd.args(["-ss", &format!("{start:.3}")]);
+        }
+
+        let child = cmd
+            .arg("-i")
             .arg(path)
             .args([
                 "-vf",
