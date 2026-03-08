@@ -2,6 +2,14 @@ use std::io::Write;
 
 use image::RgbImage;
 
+/// 4x4 Bayer ordered dithering matrix (values 0..255)
+const BAYER4: [[u8; 4]; 4] = [
+    [  0, 128,  32, 160],
+    [192,  64, 224,  96],
+    [ 48, 176,  16, 144],
+    [240, 112, 208,  80],
+];
+
 #[derive(Clone, Copy)]
 pub enum Mode {
     Ascii,
@@ -18,6 +26,8 @@ pub struct Renderer {
     chars: Vec<char>,
     buf: String,
     lum_buf: Vec<u8>,
+    char_lut: [u8; 256],
+    color_lut: [u8; 256],
 }
 
 impl Renderer {
@@ -28,6 +38,12 @@ impl Renderer {
             chars: chars.chars().collect(),
             buf: String::with_capacity(1 << 16),
             lum_buf: Vec::new(),
+            char_lut: std::array::from_fn(|i| {
+                ((i as f32 / 255.0).powf(0.7) * 255.0) as u8
+            }),
+            color_lut: std::array::from_fn(|i| {
+                ((i as f32 / 255.0).powf(0.6) * 255.0) as u8
+            }),
         }
     }
 
@@ -130,8 +146,7 @@ impl Renderer {
         // Calculate horizontal padding for centering
         let rendered_cols = match self.mode {
             Mode::Ascii | Mode::Tile => tw.min(cols),
-            Mode::Braille | Mode::Octant => (tw / 2).min(cols),
-            Mode::Sextant => (tw / 2).min(cols),
+            Mode::Braille | Mode::Octant | Mode::Sextant => (tw / 2).min(cols),
             Mode::Kanji => {
                 let cell = crate::kanji::CELL;
                 (tw / cell) * 2 // each kanji = 2 terminal columns
@@ -144,33 +159,19 @@ impl Renderer {
         };
 
         match self.mode {
-            Mode::Ascii => {
-                self.render_ascii(tw, th, stride, rgb, cols, pad);
-            }
-            Mode::Tile => {
-                self.render_tile(tw, th, stride, rgb, cols, pad);
-            }
-            Mode::Braille => {
-                self.render_braille(tw, th, stride, rgb, cols, pad);
-            }
-            Mode::Sextant => {
-                self.render_sextant(tw, th, stride, rgb, cols, pad);
-            }
-            Mode::Octant => {
-                self.render_octant(tw, th, stride, rgb, cols, pad);
-            }
-            Mode::Kanji => {
-                self.render_kanji(tw, th, stride, rgb, pad);
-            }
+            Mode::Ascii => self.render_ascii(tw, th, stride, rgb, cols, pad),
+            Mode::Tile => self.render_tile(tw, th, stride, rgb, cols, pad),
+            Mode::Braille => self.render_braille(tw, th, stride, rgb, cols, pad),
+            Mode::Sextant => self.render_sextant(tw, th, stride, rgb, cols, pad),
+            Mode::Octant => self.render_octant(tw, th, stride, rgb, cols, pad),
+            Mode::Kanji => self.render_kanji(tw, th, stride, rgb, pad),
         }
 
         w.write_all(self.buf.as_bytes())
     }
 
     fn pad_line(&mut self, pad: usize) {
-        for _ in 0..pad {
-            self.buf.push(' ');
-        }
+        self.buf.extend(std::iter::repeat_n(' ', pad));
     }
 
     fn render_ascii(
@@ -183,14 +184,6 @@ impl Renderer {
         pad: usize,
     ) {
         let ramp_len = self.chars.len();
-
-        // Mild gamma for character selection, stronger for color boost
-        let char_lut: [u8; 256] = std::array::from_fn(|i| {
-            ((i as f32 / 255.0).powf(0.7) * 255.0) as u8
-        });
-        let color_lut: [u8; 256] = std::array::from_fn(|i| {
-            ((i as f32 / 255.0).powf(0.6) * 255.0) as u8
-        });
 
         for y in 0..th {
             let row_off = y * stride;
@@ -209,14 +202,13 @@ impl Renderer {
                 let b = rgb[off + 2] as u32;
                 // Character selection: mildly corrected luminance
                 let lum = ((r * 77 + g * 150 + b * 29) >> 8) as usize;
-                let corrected_lum = char_lut[lum] as usize;
+                let corrected_lum = self.char_lut[lum] as usize;
                 let idx = (corrected_lum * (ramp_len - 1)) / 255;
                 if self.color {
                     // Color output: scale RGB by stronger gamma ratio
-                    let fg = boost_color(r, g, b, lum, &color_lut);
+                    let fg = boost_color(r, g, b, lum, &self.color_lut);
                     if first || fg != prev_fg {
-                        use std::fmt::Write;
-                        let _ = write!(self.buf, "\x1b[38;2;{};{};{}m", fg.0, fg.1, fg.2);
+                        push_fg(&mut self.buf, fg.0, fg.1, fg.2);
                         prev_fg = fg;
                         first = false;
                     }
@@ -289,11 +281,10 @@ impl Renderer {
 
                 // Only emit escape codes when color changes
                 if first || fg != prev_fg || bg_color != prev_bg {
-                    use std::fmt::Write;
-                    let _ = write!(
-                        self.buf,
-                        "\x1b[38;2;{};{};{};48;2;{};{};{}m",
-                        fg.0, fg.1, fg.2, bg_color.0, bg_color.1, bg_color.2
+                    push_fg_bg(
+                        &mut self.buf,
+                        fg.0, fg.1, fg.2,
+                        bg_color.0, bg_color.1, bg_color.2,
                     );
                     prev_fg = fg;
                     prev_bg = bg_color;
@@ -325,22 +316,6 @@ impl Renderer {
             (1, 0, 8),   (1, 1, 16),  (1, 2, 32),  (1, 3, 128),
         ];
 
-        // 4x4 Bayer ordered dithering matrix (values 0..255)
-        const BAYER4: [[u8; 4]; 4] = [
-            [  0, 128,  32, 160],
-            [192,  64, 224,  96],
-            [ 48, 176,  16, 144],
-            [240, 112, 208,  80],
-        ];
-
-        // Mild gamma for dot selection, stronger for color boost
-        let dot_lut: [u8; 256] = std::array::from_fn(|i| {
-            ((i as f32 / 255.0).powf(0.7) * 255.0) as u8
-        });
-        let color_lut: [u8; 256] = std::array::from_fn(|i| {
-            ((i as f32 / 255.0).powf(0.6) * 255.0) as u8
-        });
-
         let cell_cols = (tw / 2).min(cols);
         let cell_rows = th / 4;
 
@@ -356,7 +331,6 @@ impl Renderer {
                 let mut sr: u32 = 0;
                 let mut sg: u32 = 0;
                 let mut sb: u32 = 0;
-                let mut count: u32 = 0;
                 let mut lum_min: u32 = 255;
                 let mut lum_max: u32 = 0;
 
@@ -378,7 +352,6 @@ impl Renderer {
                     sr += r;
                     sg += g;
                     sb += b;
-                    count += 1;
                 }
 
                 // Smooth threshold reduction based on cell uniformity.
@@ -390,10 +363,10 @@ impl Renderer {
                 // Scale down thresholds: uniform areas get thresholds * (1 - uniformity²)
                 let threshold_scale = 1.0 - uniformity * uniformity;
 
-                for (i, &(_dx, dy, bit)) in DOTS.iter().enumerate() {
+                for (i, &(dx, dy, bit)) in DOTS.iter().enumerate() {
                     let py = y0 + dy;
-                    let px = x0 + DOTS[i].0;
-                    let corrected_lum = dot_lut[dot_lums[i] as usize] as u32;
+                    let px = x0 + dx;
+                    let corrected_lum = self.char_lut[dot_lums[i] as usize] as u32;
                     let base_threshold = BAYER4[py % 4][px % 4] as f32;
                     let threshold = (base_threshold * threshold_scale) as u32;
                     if corrected_lum > threshold {
@@ -401,29 +374,25 @@ impl Renderer {
                     }
                 }
 
-                if count > 0 && self.color {
-                    // Color: boost by stronger gamma ratio
-                    let avg_r = sr / count;
-                    let avg_g = sg / count;
-                    let avg_b = sb / count;
+                if self.color {
+                    // Color: boost by stronger gamma ratio (DOTS always has 8 elements)
+                    let avg_r = sr / 8;
+                    let avg_g = sg / 8;
+                    let avg_b = sb / 8;
                     let avg_lum = ((avg_r * 77 + avg_g * 150 + avg_b * 29) >> 8) as usize;
-                    let fg = boost_color(avg_r, avg_g, avg_b, avg_lum, &color_lut);
+                    let fg = boost_color(avg_r, avg_g, avg_b, avg_lum, &self.color_lut);
                     if first || fg != prev_fg {
-                        use std::fmt::Write;
-                        let _ = write!(
-                            self.buf,
-                            "\x1b[38;2;{};{};{}m",
-                            fg.0, fg.1, fg.2
-                        );
+                        push_fg(&mut self.buf, fg.0, fg.1, fg.2);
                         prev_fg = fg;
                         first = false;
                     }
-                } else if !first && self.color {
+                } else if !first {
                     self.buf.push_str("\x1b[0m");
                     first = true;
                 }
 
-                let ch = char::from_u32(0x2800 + bits as u32).unwrap_or(' ');
+                // SAFETY: 0x2800 + (0..=255) is always a valid Unicode scalar value
+                let ch = unsafe { char::from_u32_unchecked(0x2800 + bits as u32) };
                 self.buf.push(ch);
             }
             self.buf.push_str("\x1b[0m");
@@ -443,14 +412,6 @@ impl Renderer {
         cols: usize,
         pad: usize,
     ) {
-        // 4x4 Bayer ordered dithering matrix
-        const BAYER4: [[u8; 4]; 4] = [
-            [  0, 128,  32, 160],
-            [192,  64, 224,  96],
-            [ 48, 176,  16, 144],
-            [240, 112, 208,  80],
-        ];
-
         let cell_cols = (tw / 2).min(cols);
         let cell_rows = th / 3;
 
@@ -497,11 +458,10 @@ impl Renderer {
                         ((bg_r / bg_n) as u8, (bg_g / bg_n) as u8, (bg_b / bg_n) as u8)
                     } else { (0, 0, 0) };
                     if first || fg != prev_fg || bg != prev_bg {
-                        use std::fmt::Write;
-                        let _ = write!(
-                            self.buf,
-                            "\x1b[38;2;{};{};{};48;2;{};{};{}m",
-                            fg.0, fg.1, fg.2, bg.0, bg.1, bg.2
+                        push_fg_bg(
+                            &mut self.buf,
+                            fg.0, fg.1, fg.2,
+                            bg.0, bg.1, bg.2,
                         );
                         prev_fg = fg;
                         prev_bg = bg;
@@ -528,14 +488,6 @@ impl Renderer {
         cols: usize,
         pad: usize,
     ) {
-        // 4x4 Bayer ordered dithering matrix
-        const BAYER4: [[u8; 4]; 4] = [
-            [  0, 128,  32, 160],
-            [192,  64, 224,  96],
-            [ 48, 176,  16, 144],
-            [240, 112, 208,  80],
-        ];
-
         let cell_cols = (tw / 2).min(cols);
         let cell_rows = th / 4;
 
@@ -582,11 +534,10 @@ impl Renderer {
                         ((bg_r / bg_n) as u8, (bg_g / bg_n) as u8, (bg_b / bg_n) as u8)
                     } else { (0, 0, 0) };
                     if first || fg != prev_fg || bg != prev_bg {
-                        use std::fmt::Write;
-                        let _ = write!(
-                            self.buf,
-                            "\x1b[38;2;{};{};{};48;2;{};{};{}m",
-                            fg.0, fg.1, fg.2, bg.0, bg.1, bg.2
+                        push_fg_bg(
+                            &mut self.buf,
+                            fg.0, fg.1, fg.2,
+                            bg.0, bg.1, bg.2,
                         );
                         prev_fg = fg;
                         prev_bg = bg;
@@ -614,14 +565,6 @@ impl Renderer {
     ) {
         use crate::kanji::{self, CELL};
 
-        // Mild gamma for character selection, stronger for color boost
-        let char_lut: [u8; 256] = std::array::from_fn(|i| {
-            ((i as f32 / 255.0).powf(0.7) * 255.0) as u8
-        });
-        let color_lut: [u8; 256] = std::array::from_fn(|i| {
-            ((i as f32 / 255.0).powf(0.6) * 255.0) as u8
-        });
-
         let kanji_cols = tw / CELL;
         let kanji_rows = th / CELL;
         let half = CELL / 2;
@@ -638,7 +581,7 @@ impl Renderer {
                     let g = rgb[off + 1] as u32;
                     let b = rgb[off + 2] as u32;
                     let lum = ((r * 77 + g * 150 + b * 29) >> 8) as u8;
-                    self.lum_buf[y * tw + x] = char_lut[lum as usize];
+                    self.lum_buf[y * tw + x] = self.char_lut[lum as usize];
                 } else {
                     self.lum_buf[y * tw + x] = 0;
                 }
@@ -703,10 +646,9 @@ impl Renderer {
                     let avg_g = sg / cell_pixels;
                     let avg_b = sb / cell_pixels;
                     let avg_lum = ((avg_r * 77 + avg_g * 150 + avg_b * 29) >> 8) as usize;
-                    let fg = boost_color(avg_r, avg_g, avg_b, avg_lum, &color_lut);
+                    let fg = boost_color(avg_r, avg_g, avg_b, avg_lum, &self.color_lut);
                     if first || fg != prev_fg {
-                        use std::fmt::Write;
-                        let _ = write!(self.buf, "\x1b[38;2;{};{};{}m", fg.0, fg.1, fg.2);
+                        push_fg(&mut self.buf, fg.0, fg.1, fg.2);
                         prev_fg = fg;
                         first = false;
                     }
@@ -724,6 +666,56 @@ impl Renderer {
         self.buf.push_str("\x1b[0K\x1b[J");
     }
 }
+
+// ── Fast ANSI escape code writing ──────────────────────────────────────
+// Bypasses std::fmt machinery for the hot path.
+
+/// Push a u8 as decimal ASCII digits directly into the buffer.
+#[inline(always)]
+fn push_u8(buf: &mut String, n: u8) {
+    if n >= 100 {
+        buf.push((b'0' + n / 100) as char);
+        buf.push((b'0' + (n / 10) % 10) as char);
+        buf.push((b'0' + n % 10) as char);
+    } else if n >= 10 {
+        buf.push((b'0' + n / 10) as char);
+        buf.push((b'0' + n % 10) as char);
+    } else {
+        buf.push((b'0' + n) as char);
+    }
+}
+
+/// Write "\x1b[38;2;R;G;Bm" (foreground color) without fmt machinery.
+#[inline(always)]
+fn push_fg(buf: &mut String, r: u8, g: u8, b: u8) {
+    buf.push_str("\x1b[38;2;");
+    push_u8(buf, r);
+    buf.push(';');
+    push_u8(buf, g);
+    buf.push(';');
+    push_u8(buf, b);
+    buf.push('m');
+}
+
+/// Write "\x1b[38;2;R;G;B;48;2;R;G;Bm" (fg + bg color) without fmt machinery.
+#[inline(always)]
+fn push_fg_bg(buf: &mut String, fr: u8, fg: u8, fb: u8, br: u8, bg: u8, bb: u8) {
+    buf.push_str("\x1b[38;2;");
+    push_u8(buf, fr);
+    buf.push(';');
+    push_u8(buf, fg);
+    buf.push(';');
+    push_u8(buf, fb);
+    buf.push_str(";48;2;");
+    push_u8(buf, br);
+    buf.push(';');
+    push_u8(buf, bg);
+    buf.push(';');
+    push_u8(buf, bb);
+    buf.push('m');
+}
+
+// ── Character mapping functions ────────────────────────────────────────
 
 /// Map a 6-bit sextant pattern (row-major 2×3 grid) to the corresponding Unicode character.
 /// Grid bit layout:
@@ -789,7 +781,8 @@ fn octant_char(pattern: u8) -> char {
                 0x40, 0x50, 0x55, 0x5A, 0x5F, 0x80, 0xA0, 0xA5, 0xAA, 0xAF,
                 0xC0, 0xF0, 0xF5, 0xFA, 0xFC, 0xFF,
             ];
-            let below = SKIP.iter().filter(|&&s| s < p).count() as u32;
+            // SKIP is sorted, so use binary search instead of linear filter
+            let below = SKIP.partition_point(|&s| s < p) as u32;
             char::from_u32(0x1CD00 + p as u32 - below).unwrap()
         }
     }
