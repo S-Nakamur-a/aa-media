@@ -191,7 +191,10 @@ pub fn run_video(source: &str, mode: Mode, chars: &str, color: bool) -> Result<(
 
                 stdout.flush()?;
             }
-            None => break,
+            None => {
+                player.seek(0.0)?;
+                continue;
+            }
         }
 
         // Hybrid frame timing: sleep for bulk, spin for precision
@@ -207,8 +210,4 @@ pub fn run_video(source: &str, mode: Mode, chars: &str, color: bool) -> Result<(
             }
         }
     }
-
-    crossterm::execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
-    terminal::disable_raw_mode()?;
-    Ok(())
 }
