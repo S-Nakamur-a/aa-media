@@ -118,12 +118,12 @@ impl Renderer {
         &mut self,
         w: &mut W,
         img: &RgbImage,
-        _cols: u16,
+        cols: u16,
     ) -> std::io::Result<()> {
         let width = img.width() as usize;
         let height = img.height() as usize;
         let pixels = img.as_raw();
-        self.render_rgb_buffer(w, pixels, width as u16, height as u16, width as u16)
+        self.render_rgb_buffer(w, pixels, width as u16, height as u16, cols)
     }
 
     /// Render raw RGB buffer. This is the hot path for video.
